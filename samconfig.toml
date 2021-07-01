@@ -1,0 +1,11 @@
+version = 0.1
+[default]
+[default.deploy]
+[default.deploy.parameters]
+stack_name = "BA-APP"
+s3_bucket = "aws-sam-cli-managed-default-samclisourcebucket-18fwvr3gizm8a"
+s3_prefix = "BA-APP"
+region = "eu-central-1"
+confirm_changeset = true
+capabilities = "CAPABILITY_IAM CAPABILITY_AUTO_EXPAND"
+parameter_overrides = "CognitoDomainName=\"bestelldemo\" AppName=\"cogtest\" ClientDomains=\"http://localhost:8080\" SESMail=\"appbestellapp@gmail.com\" GithubRepository=\"https://github.com/simonx44/bestellapp_backend_ba\" PersonalAcessToken=\"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\" Branch=\"main\""

@@ -1,0 +1,34 @@
+
+
+
+//Color-background
+
+$color-background: #1d3893;
+
+
+$color-background_blue: #1d3893;
+$color-active_blue: linear-gradient(
+    90deg,
+    rgba(0, 170, 245, 1) 0%,
+    rgba(162, 233, 237, 1) 100%);
+
+$color-background_red: #931d1d;
+$color-active_red: linear-gradient(
+    90deg,
+    rgba(240, 12, 12, 0.74) 0%,
+    rgb(247, 119, 119) 100%);
+
+$color-background_orange: #ac6c24;
+$color-active_orange: linear-gradient(
+    90deg,
+    rgb(194, 140, 70) 0%,
+    rgb(241, 183, 116) 100%);
+    
+$color-background_green: #008518;
+$color-active_green: linear-gradient(
+    90deg,
+    rgb(55, 179, 86) 0%,
+    rgb(127, 214, 149) 100%);
+
+
+$color-landingpage: white;

@@ -1,0 +1,8 @@
+{
+    "name": "PutUserInGroup",
+    "version": "1.0.0",
+    "description": "Nutzer werden nach Registrieung einer Gruppe zugewiesen",
+    "license": "MIT",
+    "dependencies": {
+    }
+}

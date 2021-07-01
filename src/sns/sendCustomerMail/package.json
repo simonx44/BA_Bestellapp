@@ -1,0 +1,11 @@
+{
+    "name": "sendCustomerMail",
+    "version": "1.0.0",
+    "description": "Mail an Kunden und Restaurant nach Bestellung",
+    "main": "index.js",
+    "author": "",
+    "license": "MIT",
+    "dependencies": {
+    }
+  }
+  

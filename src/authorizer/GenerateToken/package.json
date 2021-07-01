@@ -1,0 +1,9 @@
+{
+    "name": "Auth",
+    "version": "1.0.0",
+    "description": "Creates a ToDo item on the DynamoDB Table",
+    "license": "MIT",
+    "dependencies": {
+        "jwt-decode": "^3.1.2"
+    }
+}

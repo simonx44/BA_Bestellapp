@@ -1,0 +1,849 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  Prototyp Essensbestellapp - Bachelorarbeit
+Transform:
+  - AWS::Serverless-2016-10-31
+
+##############
+# Global     #
+##############
+Globals:
+  Function:
+    Timeout: 4
+    Runtime: nodejs12.x
+
+Parameters:
+  CognitoDomainName:
+    Type: String
+    Default: bestelldemo
+  AppName:
+    Type: String
+    Description: AppApi
+  ClientDomains:
+    Type: CommaDelimitedList
+    Description: Domains, die den Service nutzen können
+  SESMail:
+    Type: String
+    Description: Email für SES -> Muss manuell registriert werden
+
+Resources:
+# Lambda Layer - Enthält Bibliotheken für mehrere Funktionen
+  FunctionLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Join ["-", [Layer, !Ref AWS::StackName]]
+      Description: Layer für Lambda Funktionen
+      ContentUri: src/dependencies
+      CompatibleRuntimes:
+        - nodejs12.x
+      LicenseInfo: "MIT"
+      RetentionPolicy: Retain
+  
+
+  ###### DynamoDB-Tabelle für das Single-Table Design ###############
+
+  AppTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Join ["-", [Apptable, !Ref AWS::StackName]]
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: GSI1-PK
+          AttributeType: S
+        - AttributeName: GSI1-SK
+          AttributeType: S
+        - AttributeName: GSI2-PK
+          AttributeType: S
+        - AttributeName: GSI2-SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+      SSESpecification:
+        SSEEnabled: true
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - AttributeName: GSI1-PK
+              KeyType: HASH
+            - AttributeName: GSI1-SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+          ProvisionedThroughput:
+            ReadCapacityUnits: 5
+            WriteCapacityUnits: 5
+        - IndexName: GSI2
+          KeySchema:
+            - AttributeName: GSI2-PK
+              KeyType: HASH
+            - AttributeName: GSI2-SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+          ProvisionedThroughput:
+            ReadCapacityUnits: 5
+            WriteCapacityUnits: 5
+
+
+#####################
+#### AUTH-Service ###
+#####################
+
+  #COGNITO - AUTH Service
+  #Erstellt Pool um Nutzer zu speichern und diese zu authentifizieren
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: false
+      UserPoolName: !Sub ${AppName}-UserPool
+      UsernameAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 6
+          RequireLowercase: true
+          RequireNumbers: false
+          RequireSymbols: false
+          RequireUppercase: true
+      Schema:
+        - AttributeDataType: Boolean
+          Name: isCustomer
+        - AttributeDataType: String
+          Name: adress
+          Mutable: true
+
+  #Beschreibt eine Anwendung mit der die Authorisierung getätigt werden kann
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientName: !Sub ${AppName}-UserPoolClient
+      GenerateSecret: false # Web clients immer false
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows: ["code", "implicit"] # Implicit ermöglicht Tests mit postman
+      CallbackURLs: !Ref ClientDomains # Enthält alle URLs die Cognito nutzen
+      LogoutURLs: !Ref ClientDomains # Enthält alle URLs die Cognito nutzen
+      SupportedIdentityProviders: ["COGNITO"]
+      AllowedOAuthScopes: ["phone", "email", "openid"] #Properties die abgefragt werden können, in einem Token
+      ExplicitAuthFlows:
+        - USER_PASSWORD_AUTH
+  #
+  RestaurantUserGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: Restaurants
+      Description: Restaurant UserPool
+      Precedence: 0
+      UserPoolId: !Ref UserPool
+
+  CustomerUserGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: Customers
+      Description: Usergroup for Customer
+      Precedence: 0
+      UserPoolId: !Ref UserPool
+
+  #Rolle für PostConfirmationTrigger 
+  # Enthält Berechtigung zum Zugriff auf die Datenbank und Cognito
+  CognitoPostConfirmationTriggerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                Resource: !GetAtt AppTable.Arn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+              - Effect: Allow
+                Action:
+                  - cognito-idp:AdminAddUserToGroup
+                Resource: !Sub arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/*
+
+
+  # Bei der Tokengenerieren, wird die Nutzergruppe in den Token als Scope aufgenommen
+  # sodass über das API Gateway die Nutzerautorisierung nach Gruppen möglich wird
+  UserPoolPreTokenTrigger:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-CognitoPostAuthenticationTriggerFn"
+      Timeout: 5
+      Handler: handler.authorizer
+      Runtime: nodejs12.x
+      CodeUri: src/authorizer/GenerateToken
+      Events:
+        CognitoTrigger:
+          Type: Cognito
+          Properties:
+            Trigger: PreTokenGeneration
+            UserPool: !Ref UserPool
+
+  UserPoolPostConfirmationTrigger:
+    Type: AWS::Serverless::Function
+    Properties:
+      Timeout: 5
+      Handler: index.handler
+      Runtime: nodejs12.x
+      CodeUri: src/authorizer/PutUserInGroup
+      Role: !GetAtt CognitoPostConfirmationTriggerExecutionRole.Arn
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref AppTable
+      Events:
+        CognitoTrigger:
+          Type: Cognito
+          Properties:
+            Trigger: PostConfirmation
+            UserPool: !Ref UserPool
+
+##############################################
+#### REST-API mit API Gateway und HTTP-API ###
+##############################################
+ 
+  AppApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      Auth:
+        Authorizers:
+          GeneralAuth:
+            ##  AuthorizationScopes:
+            ## - email
+            IdentitySource: "$request.header.Authorization"
+            JwtConfiguration:
+              issuer: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}
+              audience:
+                - !Ref UserPoolClient
+      CorsConfiguration:
+        AllowOrigins:
+          - "http://localhost:8080"
+        AllowHeaders:
+          - Authorization
+          - Content-Type
+          - Access-Control-Allow-Headers
+        AllowMethods:
+          - GET
+          - PUT
+          - OPTIONS
+          - HEAD
+          - POST
+          - Delete
+        MaxAge: 600
+        AllowCredentials: true
+
+  ## REST Endpunkt: CUSTOMERS #######      
+
+  # GET -> /customer/{id} 
+  # Beschafft Kundendaten
+  GetCustomerDataFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/rest/customer/getCustomerData
+      Handler: index.handler
+      Layers:
+        - !Ref FunctionLayer
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref AppTable
+        - CloudWatchPutMetricPolicy: {}
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref AppTable
+      Events:
+        GetCustomerData:
+          Type: HttpApi
+          Properties:
+            Auth:
+              Authorizer: GeneralAuth
+              AuthorizationScopes:
+                - !Sub Customers-${UserPoolClient}
+            Path: /customers/{id}
+            Method: get
+            ApiId: !Ref AppApi
+
+  # PUT -> /customer/{id} 
+  # Kundendaten ändern
+  UpdateCustomerDataFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/rest/customer/putCustomerData
+      Handler: index.handler
+      Layers:
+        - !Ref FunctionLayer
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AppTable
+        - CloudWatchPutMetricPolicy: {}
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref AppTable
+      Events:
+        PutCustomerData:
+          Type: HttpApi
+          Properties:
+            Auth:
+              Authorizer: GeneralAuth
+              AuthorizationScopes:
+                - !Sub Customers-${UserPoolClient}
+            Path: /customers/{id}
+            Method: put
+            ApiId: !Ref AppApi
+
+  # GET -> /customer/{id}/orders 
+  # Bestellungen eines Kunden beschaffen
+  GetCustomerOrdersFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/rest/customer/orders/getOrdersByCustomerId
+      Handler: index.handler
+      Layers:
+        - !Ref FunctionLayer
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AppTable
+        - CloudWatchPutMetricPolicy: {}
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref AppTable
+          INDEX_NAME: GSI1
+          INDEX2_NAME: GSI2
+      Events:
+        GetCustomerOrders:
+          Type: HttpApi
+          Properties:
+            Auth:
+              Authorizer: GeneralAuth
+              AuthorizationScopes:
+                - !Sub Customers-${UserPoolClient}
+            Path: /customers/{id}/orders
+            Method: get
+            ApiId: !Ref AppApi
+
+  ## REST Endpunkt: restaurants #######
+
+  ## GET - /restaurant/{id} 
+  # Restaurantdaten beschaffen
+  GetRestaurantDataFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/rest/restaurant/getRestaurantData
+      Handler: index.handler
+      Layers:
+        - !Ref FunctionLayer
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref AppTable
+        - CloudWatchPutMetricPolicy: {}
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref AppTable
+      Events:
+        GetRestaurantData:
+          Type: HttpApi
+          Properties:
+            Auth:
+              Authorizer: GeneralAuth
+              AuthorizationScopes:
+                - !Sub Restaurants-${UserPoolClient}
+            Path: /restaurants/{id}
+            Method: get
+            ApiId: !Ref AppApi
+  
+  ## GET - /restaurant 
+  # Alle Restaurants beschaffen
+  GetRestaurantListDataFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/rest/restaurant/getRestaurantList
+      Handler: index.handler
+      Layers:
+        - !Ref FunctionLayer
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref AppTable
+        - CloudWatchPutMetricPolicy: {}
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref AppTable
+          INDEX_NAME: GSI1
+      Events:
+        GetRestaurantsList:
+          Type: HttpApi
+          Properties:
+            Auth:
+              Authorizer: GeneralAuth
+            Path: /restaurants
+            Method: get
+            ApiId: !Ref AppApi
+
+  ## GET - /restaurants/{id}/orders
+  #  Eingegangene Bestellungen eines Restaurants anzeigen
+  GetRestaurantOrdersFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/rest/restaurant/orders/getOrdersByRestaurantId
+      Handler: index.handler
+      Layers:
+        - !Ref FunctionLayer
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AppTable
+        - CloudWatchPutMetricPolicy: {}
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref AppTable
+          INDEX_NAME: GSI1
+          INDEX2_NAME: GSI2
+      Events:
+        GetRestaurantOrders:
+          Type: HttpApi
+          Properties:
+            Auth:
+              Authorizer: GeneralAuth
+              AuthorizationScopes:
+                - !Sub Restaurants-${UserPoolClient}
+            Path: /restaurants/{id}/orders
+            Method: get
+            ApiId: !Ref AppApi
+
+  ## PUT - /restaurant/{id} 
+  # Restaurant updaten
+  UpdateRestaurantDataFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/rest/restaurant/putRestaurantData
+      Handler: index.handler
+      Layers:
+        - !Ref FunctionLayer
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AppTable
+        - CloudWatchPutMetricPolicy: {}
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref AppTable
+      Events:
+        UpdateRestaurants:
+          Type: HttpApi
+          Properties:
+            Auth:
+              Authorizer: GeneralAuth
+              AuthorizationScopes:
+                - !Sub Restaurants-${UserPoolClient}
+            Path: /restaurants/{id}
+            Method: put
+            ApiId: !Ref AppApi
+  
+   ## REST Endpunkt: MENU #######
+
+  ## GET - /menu/{id}/categories  
+  # Categorien einer Speisekarte
+  GetMenuCategoriesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/rest/restaurant/menu/categories/getCategories
+      Handler: index.handler
+      Layers:
+        - !Ref FunctionLayer
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AppTable
+        - CloudWatchPutMetricPolicy: {}
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref AppTable
+      Events:
+        GetMenuCategories:
+          Type: HttpApi
+          Properties:
+            Path: /menu/{id}/categories
+            Method: get
+            ApiId: !Ref AppApi
+
+  ## - PUT  - /menu/{id}/categories  
+  # Categorien einer Speisekarte ändern
+  PutMenuCategoriesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/rest/restaurant/menu/categories/putCategories
+      Handler: index.handler
+      Layers:
+        - !Ref FunctionLayer
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AppTable
+        - CloudWatchPutMetricPolicy: {}
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref AppTable
+      Events:
+        PutMenuCategories:
+          Type: HttpApi
+          Properties:
+            Auth:
+              Authorizer: GeneralAuth
+              AuthorizationScopes:
+                - !Sub Restaurants-${UserPoolClient}
+            Path: /menu/{id}/categories
+            Method: put
+            ApiId: !Ref AppApi
+
+  # GET -  menu{id}/items
+  # Menu-Items beschaffen
+
+  GetMenuItemsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/rest/restaurant/menu/items/getItems
+      Handler: index.handler
+      Layers:
+        - !Ref FunctionLayer
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AppTable
+        - CloudWatchPutMetricPolicy: {}
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref AppTable
+      Events:
+        GetMenuItems:
+          Type: HttpApi
+          Properties:
+            Path: /menu/{id}/items
+            Method: get
+            ApiId: !Ref AppApi
+  
+  
+  # POST -  menu{id}/items
+  # Menu-Item erstellen
+  CreateMenuItemFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/rest/restaurant/menu/items/createItem
+      Handler: index.handler
+      Layers:
+        - !Ref FunctionLayer
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AppTable
+        - CloudWatchPutMetricPolicy: {}
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref AppTable
+      Events:
+        CreateMenuItem:
+          Type: HttpApi
+          Properties:
+            Auth:
+              Authorizer: GeneralAuth
+              AuthorizationScopes:
+                - !Sub Restaurants-${UserPoolClient}
+            Path: /menu/{id}/items
+            Method: post
+            ApiId: !Ref AppApi
+  
+  # POST -  /menu/{id}/items/{itemid}
+  # Menu-Item updaten
+  UpdateMenuItemFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/rest/restaurant/menu/items/updateItem
+      Handler: index.handler
+      Layers:
+        - !Ref FunctionLayer
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AppTable
+        - CloudWatchPutMetricPolicy: {}
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref AppTable
+      Events:
+        UpdateMenuItem:
+          Type: HttpApi
+          Properties:
+            Path: /menu/{id}/items/{itemid}
+            Method: put
+            ApiId: !Ref AppApi
+
+  # DELETE -  /menu/{id}/items/{itemid}
+  # Menu-Item löschen
+  DeleteMenuItemFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/rest/restaurant/menu/items/deleteItem
+      Handler: index.handler
+      Layers:
+        - !Ref FunctionLayer
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AppTable
+        - CloudWatchPutMetricPolicy: {}
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref AppTable
+      Events:
+        DeleteMenuItem:
+          Type: HttpApi
+          Properties:
+            Path: /menu/{id}/items/{itemid}
+            Method: delete
+            ApiId: !Ref AppApi
+
+  ## REST Endpunkt: ORDERS #######
+  ### POST - /orders
+  # Bestellung erstellen
+
+  CreateOrderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/rest/order/createOrder
+      Handler: index.handler
+      Layers:
+        - !Ref FunctionLayer
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AppTable
+        - CloudWatchPutMetricPolicy: {}
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt OrderTopic.TopicName
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref AppTable
+          INDEX_NAME: GSI1
+          INDEX2_NAME: GSI2
+          TOPIC: !Ref OrderTopic
+      Events:
+        CreateOrder:
+          Type: HttpApi
+          Properties:
+            Auth:
+              Authorizer: GeneralAuth
+            Path: /orders
+            Method: post
+            ApiId: !Ref AppApi
+ 
+  # GET - /orders/{id}
+  # Bestelldetails beschaffen
+  GetOrderDetailsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/rest/order/getOrderDetail
+      Handler: index.handler
+      Layers:
+        - !Ref FunctionLayer
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AppTable
+        - CloudWatchPutMetricPolicy: {}
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref AppTable
+      Events:
+        GetOrderDetail:
+          Type: HttpApi
+          Properties:
+            Auth:
+              Authorizer: GeneralAuth
+            Path: /orders/{id}
+            Method: get
+            ApiId: !Ref AppApi
+  
+  # GET - /orders/{id}
+  # Bestellung updaten
+  UpdateOrderStateFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/rest/order/updateState
+      Handler: index.handler
+      Layers:
+        - !Ref FunctionLayer
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AppTable
+        - CloudWatchPutMetricPolicy: {}
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref AppTable
+      Events:
+        UpdateOrderState:
+          Type: HttpApi
+          Properties:
+            Auth:
+              Authorizer: GeneralAuth
+              AuthorizationScopes:
+                - !Sub Restaurants-${UserPoolClient}
+            Path: /orders/{id}
+            Method: put
+            ApiId: !Ref AppApi
+
+            
+  ## REST Endpunkt: UPLOADS #######
+
+  # Direkter Upload in ein S3- Bucket
+  # Route beschafft den Link zum Upload in ein Bucket
+  UploadRequestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/rest/s3/getUploadUrl
+      Handler: index.handler
+      Runtime: nodejs12.x
+      Timeout: 3
+      MemorySize: 128
+      Environment:
+        Variables:
+          UploadBucket: !Ref S3PictureBucket
+      Policies:
+        - S3WritePolicy:
+            BucketName: !Ref S3PictureBucket
+        - Statement:
+            - Effect: Allow
+              Resource: !Sub "arn:aws:s3:::${S3PictureBucket}/"
+              Action:
+                - s3:putObjectAcl
+      Events:
+        UploadAssetAPI:
+          Type: HttpApi
+          Properties:
+            Path: /uploads
+            Method: get
+            ApiId: !Ref AppApi
+
+  ## Bestell- Workflow###
+  ## Für die Erstellung einer Bestellung
+  ######## SNS ###################
+  OrderTopic:
+    Type: "AWS::SNS::Topic"
+    Properties:
+      TopicName: !Join ["-", [OrderTopic, !Ref AWS::StackName]]
+      Subscription:
+        - Protocol: lambda
+          Endpoint: !GetAtt SendCustomerMailFunction.Arn
+
+ # Nach dem erfolgreichen Anlegen einer Bestellung wird der Kunde über die Bestellung informiert
+  SendCustomerMailFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/sns/sendCustomerMail
+      Handler: index.handler
+      Environment:
+        Variables:
+          MAIL: !Ref SESMail
+          TABLE_NAME: !Ref AppTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AppTable
+        - SESCrudPolicy:
+            IdentityName: "*" #!Ref SESMail
+      Events:
+        SNSTOPIC:
+          Type: SNS
+          Properties:
+            Topic: !Ref OrderTopic  
+     ####### S3 Bucket als Ablage für hochgeladene Bilder
+
+  S3PictureBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - "*"
+            AllowedMethods:
+              - GET
+              - PUT
+              - HEAD
+            AllowedOrigins:
+              - "*"
+  S3TransformedPictureBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - "*"
+            AllowedMethods:
+              - GET
+              - PUT
+              - HEAD
+            AllowedOrigins:
+              - "*"
+  
+  # Nachdem direkter Upload in ein Bucket erfolgt, wird die Funktion durch ein Event ausgelöst
+  # Funktion erzeugt komprimiertes Bild und lädt dieses in ein weiteres Bucket
+  # Bild-URL werden in DB gespeichert            
+  PutPictureUrlInDB:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/s3/created
+      Handler: index.handler
+      Runtime: nodejs12.x
+      Timeout: 60
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AppTable
+        - CloudWatchPutMetricPolicy: {}
+        - S3WritePolicy:
+            BucketName: !Ref S3TransformedPictureBucket
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref AppTable
+          REGION: !Ref AWS::Region
+          TRANSFORMEDBUCKET: !Ref S3TransformedPictureBucket
+      Events:
+        CreateThumbnailEvent:
+          Type: S3
+          Properties:
+            Bucket: !Ref S3PictureBucket
+            Events: s3:ObjectCreated:*
+
+Outputs:
+  UserPool:
+    Description: UserPool wird clientseitig für Ampflify Bibliotheken benötigt
+    Value: !Ref UserPool
+
+  UserPoolClientId:
+    Description: Application client ID - Für Ampflify 
+    Value: !Ref UserPoolClient
+  ApiUrl:
+    Description: Url für den Zugriff auf das API-Gateway
+    Value: !<!Sub> "https://${AppApi}.execute-api.${AWS::Region}.amazonaws.com"
+
+  CloudformationStack:
+    Description: CloudFormation Stack describe Command
+    Value: !Sub 
+      - aws cloudformation describe-stacks --stack-name ${StackName}
+      - StackName: !Ref AWS::StackName
+
+
+
+
+

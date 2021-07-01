@@ -1,0 +1,16 @@
+{
+  "version": "1",
+  "region": "eu-central-1",
+  "userPoolId": "eu-central-1_M404wAkEX",
+  "userName": "669f29f1-0336-417e-a0bb-82e7f1cdae9e",
+  "request": {
+    "userAttributes": {
+      "sub": "669f29f1-0336-417e-a0bb-82e7f1cdae9e",
+      "email_verified": "true",
+      "cognito:email_alias": "sinon.schwegler@live.de",
+      "custom:isCustomer": "true",
+      "email": "sinon.schwegler@live.de"
+    }
+  },
+  "response": {}
+}

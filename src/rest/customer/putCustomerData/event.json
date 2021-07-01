@@ -1,0 +1,12 @@
+{
+    "pathParameters": {
+      "id": "8414bb27-c445-4b4d-9bf6-39b09ba92822"
+    },
+    "body": {
+      "updateType": "adress",
+      "postleitzahl": "88326",
+      "stadt": "Aulendorf",
+      "strasse": "jadshdweg",
+      "hausnummer": "16a"
+    }
+  }
